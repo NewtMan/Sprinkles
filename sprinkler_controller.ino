@@ -8,7 +8,7 @@
 #define WEBDUINO_FAVICON_DATA ""
 #include <WebServer.h>
 
-#define VERSION   "1.0"
+#define VERSION   "1.2a"
 
 // TimeZone stuff
 TimeChangeRule myDST = {"PDT", Second, Sun, Mar, 2, -420};    //Pacific Daylight time = UTC - 7 hours
@@ -21,12 +21,13 @@ typedef struct {
   boolean on;                         // ON/OFF state
   byte pin;                           // Control pin (digital)
   char name[MAX_ZONE_NAME];           // Zone name
-} WaterZone; 
+} WaterZone;
 
+// My watering zones
 const byte NUM_ZONES = 4;
 WaterZone zoneList[NUM_ZONES] = {     // Watering zones
-  { false, 8, "NORTH" },
-  { false, 6, "SOUTH" },
+  { false, 8, "SOUTH" },
+  { false, 6, "NORTH" },
   { false, 7, "BACK" },
   { false, 5, "FRONT" }
 };
@@ -39,6 +40,7 @@ typedef enum {
 
 typedef struct {
   SystemMode mode;             // current operating mode
+  time_t resetTime;            // last reset timestamp
 } SystemStatus;
 
 SystemStatus sysStatus;
@@ -55,7 +57,13 @@ SystemStatus sysStatus;
 
 
 // HTML strings/tools
-P(htmlDocStyle) = "<head><style>td,th{padding:3px;text-align:center;}.on{background-color:#66cc66}</style></head>\n";
+P(htmlDocStyle) = "<head><style>\
+                      body{background-color:#b0c4de;}\
+                      td,th{padding:3px;text-align:center;background-color:#ffffff;}\
+                      .on{background-color:#66cc66}\
+                      .title{font-size:xx-large;font-weight:bold}\
+                      .vers{font-size:small}\
+                   </style></head>\n";
 P(htmlTableHead) = "<table border=\"1\"><tr>\n";
 P(htmlNextRow) = "</tr><tr>\n";
 P(htmlTDHead) = "<td>\n";
@@ -68,100 +76,100 @@ P(htmlSelectTail) = "</select></td>\n";
 P(htmlPara) = "<p>\n";
 
 class ZoneLog {
-  int head, tail;
+    int head, tail;
 
-public:
-  void begin() {
+  public:
+    void begin() {
 
-    // Initialize pointers
-    EEPROM.get(EEADDR_ZONE_LOG_BASE, head);
-    EEPROM.get(EEADDR_ZONE_LOG_BASE + sizeof(int), tail);
-  }
-
-  // Clear out the log
-  void clear() {
-    head = tail = EEADDR_ZONE_LOG_START;
-    EEPROM.put(EEADDR_ZONE_LOG_BASE, head);
-    EEPROM.put(EEADDR_ZONE_LOG_BASE + sizeof(int), tail);
-  }
-
-  // Add log entry
-  void add(byte zone, boolean state) {
-    
-    time_t tm = myTZ.toLocal(now());    
-    EEPROM.put(head, tm);
-    head += sizeof(tm);
-    EEPROM.put(head, zone);
-    head += sizeof(zone);
-    EEPROM.put(head, state);
-    head += sizeof(state);
-
-    if (head >= EEADDR_ZONE_LOG_END) {
-      head = EEADDR_ZONE_LOG_START;
+      // Initialize pointers
+      EEPROM.get(EEADDR_ZONE_LOG_BASE, head);
+      EEPROM.get(EEADDR_ZONE_LOG_BASE + sizeof(int), tail);
     }
-    if (head == tail) {
-      tail = head + ZONE_LOG_ELEM_SIZE;
-      if (tail >= EEADDR_ZONE_LOG_END) {
-        tail = EEADDR_ZONE_LOG_START;
+
+    // Clear out the log
+    void clear() {
+      head = tail = EEADDR_ZONE_LOG_START;
+      EEPROM.put(EEADDR_ZONE_LOG_BASE, head);
+      EEPROM.put(EEADDR_ZONE_LOG_BASE + sizeof(int), tail);
+    }
+
+    // Add log entry
+    void add(byte zone, boolean state) {
+
+      time_t tm = myTZ.toLocal(now());
+      EEPROM.put(head, tm);
+      head += sizeof(tm);
+      EEPROM.put(head, zone);
+      head += sizeof(zone);
+      EEPROM.put(head, state);
+      head += sizeof(state);
+
+      if (head >= EEADDR_ZONE_LOG_END) {
+        head = EEADDR_ZONE_LOG_START;
       }
-    }
-    EEPROM.put(EEADDR_ZONE_LOG_BASE, head);
-    EEPROM.put(EEADDR_ZONE_LOG_BASE + sizeof(int), tail);
-  }
-
-  // Dump entire log (in HTML format) in reverse order
-  void dumpHTML(WebServer *server) {
-    time_t tm;
-    byte zone;
-    boolean state;
-
-    // Header row
-    server->printP(htmlTHHead);
-    server->print("Time");
-    server->printP(htmlTHTail);
-    server->printP(htmlTHHead);
-    server->print("Zone");
-    server->printP(htmlTHTail);
-    server->printP(htmlTHHead);
-    server->print("State");
-    server->printP(htmlTHTail);
-    server->printP(htmlNextRow);
-
-    if (head == tail) {
-      server->print("<td colspan=\"3\">");
-      server->print("-- empty --");
-      server->printP(htmlTDTail);
-    } else {
-      int addr = head;
-      while (addr != tail) {
-        addr -= ZONE_LOG_ELEM_SIZE;
-        if (addr < EEADDR_ZONE_LOG_START) {
-          addr = EEADDR_ZONE_LOG_END - ZONE_LOG_ELEM_SIZE;
+      if (head == tail) {
+        tail = head + ZONE_LOG_ELEM_SIZE;
+        if (tail >= EEADDR_ZONE_LOG_END) {
+          tail = EEADDR_ZONE_LOG_START;
         }
-                
-        EEPROM.get(addr, tm);
-        addr += sizeof(tm);
-        server->printP(htmlTDHead);
-        htmlTimeStr(tm, server);
-        server->printP(htmlTDTail);
-  
-        EEPROM.get(addr, zone);
-        addr += sizeof(zone);
-        server->printP(htmlTDHead);
-        server->print(zone + 1);
-        server->printP(htmlTDTail);
-        
-        EEPROM.get(addr, state);
-        addr += sizeof(state);
-        server->printP(htmlTDHead);
-        server->print(state ? "ON" : "OFF");
-        server->printP(htmlTDTail);
-        server->printP(htmlNextRow);
+      }
+      EEPROM.put(EEADDR_ZONE_LOG_BASE, head);
+      EEPROM.put(EEADDR_ZONE_LOG_BASE + sizeof(int), tail);
+    }
 
-        addr -= ZONE_LOG_ELEM_SIZE;
+    // Dump entire log (in HTML format) in reverse order
+    void dumpHTML(WebServer *server) {
+      time_t tm;
+      byte zone;
+      boolean state;
+
+      // Header row
+      server->printP(htmlTHHead);
+      server->print("Time");
+      server->printP(htmlTHTail);
+      server->printP(htmlTHHead);
+      server->print("Zone");
+      server->printP(htmlTHTail);
+      server->printP(htmlTHHead);
+      server->print("State");
+      server->printP(htmlTHTail);
+      server->printP(htmlNextRow);
+
+      if (head == tail) {
+        server->print("<td colspan=\"3\">");
+        server->print("-- empty --");
+        server->printP(htmlTDTail);
+      } else {
+        int addr = head;
+        while (addr != tail) {
+          addr -= ZONE_LOG_ELEM_SIZE;
+          if (addr < EEADDR_ZONE_LOG_START) {
+            addr = EEADDR_ZONE_LOG_END - ZONE_LOG_ELEM_SIZE;
+          }
+
+          EEPROM.get(addr, tm);
+          addr += sizeof(tm);
+          server->printP(htmlTDHead);
+          htmlTimeStr(tm, server);
+          server->printP(htmlTDTail);
+
+          EEPROM.get(addr, zone);
+          addr += sizeof(zone);
+          server->printP(htmlTDHead);
+          server->print(zone + 1);
+          server->printP(htmlTDTail);
+
+          EEPROM.get(addr, state);
+          addr += sizeof(state);
+          server->printP(htmlTDHead);
+          server->print(state ? "ON" : "OFF");
+          server->printP(htmlTDTail);
+          server->printP(htmlNextRow);
+
+          addr -= ZONE_LOG_ELEM_SIZE;
+        }
       }
     }
-  }
 };
 
 ZoneLog zoneLog;
@@ -183,68 +191,68 @@ typedef struct {
 #define NUM_SCHED_EVENTS    1
 
 class Schedule {
-  Event eventList[NUM_SCHED_EVENTS];
+    Event eventList[NUM_SCHED_EVENTS];
 
-public:
+  public:
 
-  // Build execution schedule from current watering cycle
-  void build(WaterCycle *cycle) {
+    // Build execution schedule from current watering cycle
+    void build(WaterCycle *cycle) {
 
-    // Clear out the schedule
-    memset(eventList, 0, sizeof(eventList));
+      // Clear out the schedule
+      memset(eventList, 0, sizeof(eventList));
 
-    // If at least one day is active in cycle...
-    if (cycle->activeDays != 0) {
+      // If at least one day is active in cycle...
+      if (cycle->activeDays != 0) {
 
-      // Find start of first event following current time
-      time_t localTime = myTZ.toLocal(now());
-      time_t eventStart = previousMidnight(localTime) + (cycle->startTime * SECS_PER_MIN);
-      while (eventStart < localTime) {
-        eventStart += SECS_PER_DAY;
-      }
-
-      //Create events to fill schedule
-      int i = 0;
-      while (i < NUM_SCHED_EVENTS) {
-        if (cycle->activeDays & (1 << weekday(eventStart))) {
-          time_t t = eventList[i].startTime = eventStart;
-          for (int j = 0; j < NUM_ZONES; j++) {
-            eventList[i].zoneStopTime[j] = t + (cycle->zone_duration[j] * SECS_PER_MIN);
-            t = eventList[i].zoneStopTime[j];
-          }
-          i++;
+        // Find start of first event following current time
+        time_t localTime = myTZ.toLocal(now());
+        time_t eventStart = previousMidnight(localTime) + (cycle->startTime * SECS_PER_MIN);
+        while (eventStart < localTime) {
+          eventStart += SECS_PER_DAY;
         }
-        eventStart += SECS_PER_DAY;
+
+        //Create events to fill schedule
+        int i = 0;
+        while (i < NUM_SCHED_EVENTS) {
+          if (cycle->activeDays & (1 << weekday(eventStart))) {
+            time_t t = eventList[i].startTime = eventStart;
+            for (int j = 0; j < NUM_ZONES; j++) {
+              eventList[i].zoneStopTime[j] = t + (cycle->zone_duration[j] * SECS_PER_MIN);
+              t = eventList[i].zoneStopTime[j];
+            }
+            i++;
+          }
+          eventStart += SECS_PER_DAY;
+        }
       }
     }
-  }
 
-  // Scan schedule for an active watering zone
-  int activeZone(WaterCycle *cycle) {
+    // Scan schedule for an active watering zone
+    int activeZone(WaterCycle *cycle) {
 
-    // If watering cycle is enabled...
-    if (cycle->enabled) {
-          
-      time_t localTime = myTZ.toLocal(now());
-      for (int i = 0; i < NUM_SCHED_EVENTS; i++) {
-        if (localTime >= eventList[i].startTime) {
-          for (int j = 0; j < NUM_ZONES; j++) {
-            if (localTime < eventList[i].zoneStopTime[j]) {
-              return (j);
+      // If watering cycle is enabled...
+      if (cycle->enabled) {
+
+        time_t localTime = myTZ.toLocal(now());
+        for (int i = 0; i < NUM_SCHED_EVENTS; i++) {
+          if (localTime >= eventList[i].startTime) {
+            for (int j = 0; j < NUM_ZONES; j++) {
+              if (localTime < eventList[i].zoneStopTime[j]) {
+                return (j);
+              }
             }
           }
         }
       }
+
+      // No event/zone is active
+      return (-1);
     }
 
-    // No event/zone is active
-    return (-1);
-  }
-
-  // return the next watering event on the schedule
-  time_t nextRun(void) {
-    return eventList[0].startTime;
-  }
+    // return the next watering event on the schedule
+    time_t nextRun(void) {
+      return eventList[0].startTime;
+    }
 };
 
 Schedule execSchedule;
@@ -255,8 +263,9 @@ void zoneOn(byte zone) {
     for (int i = 0; i < NUM_ZONES; i++) {
       zoneOff(i);
     }
-    digitalWrite(zoneList[zone].pin, HIGH);
     zoneList[zone].on = true;
+    digitalWrite(zoneList[zone].pin, HIGH);
+    delay(10);
     zoneLog.add(zone, true);
   }
 }
@@ -266,6 +275,7 @@ void zoneOff(byte zone) {
   if (zoneList[zone].on) {
     zoneList[zone].on = false;
     digitalWrite(zoneList[zone].pin, LOW);
+    delay(10);
     zoneLog.add(zone, false);
   }
 }
@@ -318,24 +328,54 @@ void htmlTimeStr(time_t t, WebServer *server) {
   server->print(myTZ.locIsDST(t) ? myDST.abbrev : mySTD.abbrev) ;
 }
 
+void htmlUptimeStr(time_t t, WebServer *server) {
+  int d;
+
+  if ((d = t / SECS_PER_WEEK) > 0) {
+    server->print(intToStr(d, 0));
+    server->printP(PSTR(" weeks, "));
+    t -= d * SECS_PER_WEEK;
+  }
+  if ((d = t / SECS_PER_DAY) > 0) {
+    server->print(intToStr(d, 0));
+    server->printP(PSTR(" days, "));
+    t -= d * SECS_PER_DAY;
+  }
+  if ((d = t / SECS_PER_HOUR) > 0) {
+    server->print(intToStr(d, 0));
+    server->printP(PSTR(" hrs, "));
+    t -= d * SECS_PER_HOUR;
+  }
+  if ((d = t / SECS_PER_MIN) > 0) {
+    server->print(intToStr(d, 0));
+    server->printP(PSTR(" mins, "));
+    t -= d * SECS_PER_MIN;
+  }
+  server->print(intToStr((int)t, 0));
+  server->printP(PSTR(" secs"));
+}
+
 // Webserver callback - "Home" page
 void homeCmd(WebServer &server, WebServer::ConnectionType type, char *, bool) {
-  
+  time_t localTime = myTZ.toLocal(now());
+
   // HTTP OK header
   server.httpSuccess();
 
   // If a HEAD request, do nothing else
   if (type != WebServer::HEAD) {
     server.printP(htmlDocStyle);
-    server.printP(PSTR("<h1>Sprinkler Controller</h1>"));
+    server.printP(PSTR("<div class=\"title\">Sprinkler Controller</div>"));
+    server.printP(PSTR("<span class=\"vers\">Version "));
+    server.print(VERSION);
+    server.printP(PSTR("</span><p>"));
 
-    // Time status
+    // Current time
     server.printP(htmlTableHead);
     server.printP(PSTR("<th>Time</th><td>"));
     if (timeStatus() == timeNotSet) {
       server.printP(PSTR("Not Set"));
     } else {
-      time_t localTime = myTZ.toLocal(now());
       htmlTimeStr(localTime, &server);
       if (timeStatus() == timeNeedsSync) {
         server.printP(PSTR(" (STALE)"));
@@ -343,6 +383,14 @@ void homeCmd(WebServer &server, WebServer::ConnectionType type, char *, bool) {
     }
     server.printP(htmlTDTail);
 
+    // Uptime
+    server.printP(htmlNextRow);
+    server.printP(PSTR("<th>Up Time</th>"));
+    server.printP(htmlTDHead);
+    htmlUptimeStr(localTime - sysStatus.resetTime, &server);
+    server.printP(htmlTDTail);
+
+    // Next cycle runtime
     server.printP(htmlNextRow);
     server.printP(PSTR("<th>Next Cycle</th>"));
     server.printP(htmlTDHead);
@@ -356,6 +404,8 @@ void homeCmd(WebServer &server, WebServer::ConnectionType type, char *, bool) {
       server.printP(PSTR("<em>Disabled</em>"));
     }
     server.printP(htmlTDTail);
+
+    // System status
     server.printP(htmlNextRow);
     server.printP(PSTR("<th>System Status</th>"));
     switch (sysStatus.mode) {
@@ -369,7 +419,7 @@ void homeCmd(WebServer &server, WebServer::ConnectionType type, char *, bool) {
         server.printP(PSTR("<td>AUTO</td>"));
         break;
     }
-
+    server.printP(htmlTDTail);
     server.printP(htmlTableTail);
     server.printP(htmlPara);
 
@@ -428,7 +478,11 @@ void homeCmd(WebServer &server, WebServer::ConnectionType type, char *, bool) {
       server.print(tail);
     }
     server.printP(htmlSelectTail);
+
+    // Cycle zone durations
+    int cycleUsage = 0;
     for (int j = 0; j < NUM_ZONES; j++) {
+      cycleUsage += curCycle.zone_duration[j];
       server.printP(PSTR("<td><select name=\"Z"));
       server.print(intToStr(j, 0));
       server.printP(PSTR("\">"));
@@ -446,10 +500,13 @@ void homeCmd(WebServer &server, WebServer::ConnectionType type, char *, bool) {
       server.printP(htmlSelectTail);
     }
 
+    // Watering days/week
+    int weekUsage = 0;
     server.printP(htmlTDHead);
     for (int j = 0; j < DAYS_PER_WEEK; j++) {
       server.printP(PSTR("<input type=\"checkbox\" "));
       if (curCycle.activeDays & (1 << j + 1)) {
+        weekUsage += cycleUsage;
         server.printP(PSTR("checked "));
       }
       server.printP(PSTR("name=\"D"));
@@ -457,6 +514,15 @@ void homeCmd(WebServer &server, WebServer::ConnectionType type, char *, bool) {
       server.printP(PSTR("\">"));
       server.print(dayShortStr(j + 1));
     }
+    server.printP(htmlTDTail);
+
+    // Total cycle usage
+    server.printP(htmlNextRow);
+    server.printP(PSTR("<th>Usage</th><td colspan=\"99\">"));
+    server.print(intToStr(cycleUsage, 0));
+    server.printP(PSTR(" mins/cycle, "));
+    server.print(intToStr(weekUsage, 0));
+    server.printP(PSTR(" mins/week"));
     server.printP(htmlTDTail);
 
     server.printP(htmlTableTail);
@@ -482,7 +548,7 @@ void homeCmd(WebServer &server, WebServer::ConnectionType type, char *, bool) {
 void manualCmd(WebServer &server, WebServer::ConnectionType type, char *tail, bool) {
   char pName[LEN];
   char pValue[LEN];
-  
+
   // If a HEAD request, do nothing else
   if (type != WebServer::HEAD) {
 
@@ -505,36 +571,36 @@ void manualCmd(WebServer &server, WebServer::ConnectionType type, char *tail, bo
   server.httpSeeOther("index.html");    // redirect back to "home" page
 }
 
-// Webserver callback - Process watering cycle
+// Webserver callback - Process watering cycle edit
 void cycleCmd(WebServer &server, WebServer::ConnectionType type, char *tail, bool) {
   char pName[LEN];
   char pValue[LEN];
-  
+
   // If a HEAD request, do nothing else
   if (type != WebServer::HEAD) {
     curCycle.activeDays = 0;    // Initialize attributes
     curCycle.enabled = false;
-    
+
     while (strlen(tail)) {
       if (server.nextURLparam(&tail, pName, LEN, pValue, LEN) != URLPARAM_EOS) {
         if (strcmp(pName, "time") == 0) {
           curCycle.startTime = strToInt(pValue);
-  
+
         } else if (pName[0] == 'Z') {
           int zone = pName[1] - '0';
           curCycle.zone_duration[zone] = strToInt(pValue);
-          
+
         } else if (pName[0] == 'D') {
           int day = pName[1] - '0';
           curCycle.activeDays |= (1 << day);
-          
+
         } else if (pName[0] == 'E') {
           curCycle.enabled = true;
         }
       }
     }
   }
-  
+
   EEPROM.put(EEADDR_WATER_CYCLE, curCycle);     // update EEPROM
 
   // re-build execution schedule
@@ -547,37 +613,27 @@ void cycleCmd(WebServer &server, WebServer::ConnectionType type, char *tail, boo
 void logCmd(WebServer &server, WebServer::ConnectionType type, char *tail, bool) {
   char pName[LEN];
   char pValue[LEN];
-  
+
   // If a HEAD request, do nothing else
   if (type != WebServer::HEAD) {
-   
+
     while (strlen(tail)) {
       if (server.nextURLparam(&tail, pName, LEN, pValue, LEN) != URLPARAM_EOS) {
         if (strcmp(pName, "CLEAR") == 0) {
           zoneLog.clear();                       // Clear zone log
-        } 
+        }
       }
     }
   }
   server.httpSeeOther("index.html");             // redirect back to "home" page
 }
-  
-void setup() {
 
-  // Come up in idle mode
-  sysStatus.mode = IDLE_MODE;
-   
-  //initialize zone control pins
-  for (int i = 0; i < NUM_ZONES; i++) {
-    pinMode(zoneList[i].pin, OUTPUT);
-  }
-  
-  allZonesOff();    // make sure all zones are off
+void setup() {
 
   // Disable SD card on Ethernet shield
   pinMode(4, OUTPUT);
   digitalWrite(4, HIGH);
-  
+
   // Open serial communications
   // Serial.begin(9600);
 
@@ -589,7 +645,7 @@ void setup() {
   // Serial.print("IP is ");
   // Serial.println(Ethernet.localIP());
 
-  // Setup UDP 
+  // Setup UDP
   Udp.begin(8888);      // arbitrary local port
 
   // Initialize Time to NTP server
@@ -603,15 +659,31 @@ void setup() {
   webserver.addCommand("cycle.html", &cycleCmd);
   webserver.addCommand("log.html", &logCmd);
   webserver.begin();
-  
+
+  // Initialize zone log
+  zoneLog.begin();
+
+  // Mark RESET in log
+  zoneLog.add(99, false);
+
+  // Come up in idle mode
+  sysStatus.mode = IDLE_MODE;
+
+  // Log reset time
+  sysStatus.resetTime = myTZ.toLocal(now());
+
+  //initialize zone control pins
+  for (int i = 0; i < NUM_ZONES; i++) {
+    pinMode(zoneList[i].pin, OUTPUT);
+  }
+
+  allZonesOff();    // make sure all zones are off
+
   // Initialize variables from EEPROM
   EEPROM.get(EEADDR_WATER_CYCLE, curCycle);
 
   // build schedule
   execSchedule.build(&curCycle);
-  
-  // Initialize zone log
-  zoneLog.begin();
 }
 
 void loop() {
@@ -627,24 +699,24 @@ void loop() {
 
     // Check schedule for automatic watering activity
     if ((z = execSchedule.activeZone(&curCycle)) != -1) {
-  
+
       // Turn on active zone
       zoneOn(z);
       sysStatus.mode = AUTO_MODE;
-         
+
     } else {
-  
+
       // No active zones
       allZonesOff();
       sysStatus.mode = IDLE_MODE;
-  
+
       // Re-build schedule when idle
       execSchedule.build(&curCycle);
     }
   }
-  
-  // pause 1 sec.
-  delay(500);
+
+  // pause 1/4 sec.
+  delay(250);
 }
 
 // send an NTP request to the time server at the given address
@@ -652,7 +724,7 @@ void sendNTPrequest(char* address)
 {
   // set all bytes in the buffer to 0
   memset(ntpPacket, 0, NTP_PACKET_SIZE);
-  
+
   // Initialize values needed to form NTP request
   // (see URL above for details on the packets)
   ntpPacket[0] = 0b11100011;   // LI, Version, Mode
@@ -674,10 +746,10 @@ void sendNTPrequest(char* address)
 
 // Parse response from NTP server
 unsigned long getNTPtime() {
-  
-  // Discard any previous packets 
-  while (Udp.parsePacket() > 0) ;    
-   
+
+  // Discard any previous packets
+  while (Udp.parsePacket() > 0) ;
+
   // Request time from NTP server
   sendNTPrequest(timeServer); // send an NTP packet to a time server
 
@@ -685,19 +757,19 @@ unsigned long getNTPtime() {
   unsigned long beginWait = millis();
   while (millis() - beginWait < 1500) {   // Wait no more than 1.5 secs.
     if (Udp.parsePacket()) {
-      
+
       // We've received a packet, read the data from it
       Udp.read(ntpPacket, NTP_PACKET_SIZE); // read the packet into the buffer
-    
+
       //the timestamp starts at byte 40 of the received packet and is four bytes,
       // or two words, long. First, esxtract the two words:
       unsigned long highWord = word(ntpPacket[40], ntpPacket[41]);
       unsigned long lowWord = word(ntpPacket[42], ntpPacket[43]);
-      
+
       // combine the four bytes (two words) into a long integer
       // this is NTP time (seconds since Jan 1 1900):
       unsigned long secsSince1900 = highWord << 16 | lowWord;
-    
+
       // now convert NTP time into everyday time
       // Unix time starts on Jan 1 1970. In seconds, that's 2208988800:
       return (secsSince1900 - 2208988800UL);
@@ -713,7 +785,7 @@ unsigned long getNTPtime() {
 int strToInt(char *str) {
   int val = 0;
   for (int i = 0; i < strlen(str); i++) {
-    val = (val *10) + (str[i] - '0');
+    val = (val * 10) + (str[i] - '0');
   }
   return val;
 }
@@ -730,7 +802,7 @@ char *intToStr(int v, int zeroPad) {
     v /= 10;
   }
   s[i] = v + '0';
-  
+
   while (LEN - (i + 1) < zeroPad) {
     s[--i] = '0';
   }
