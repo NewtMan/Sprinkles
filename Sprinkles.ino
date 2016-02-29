@@ -1,3 +1,4 @@
+#include <avr/wdt.h>
 #include <EEPROM.h>
 #include <SPI.h>
 #include <Ethernet.h>
@@ -8,7 +9,7 @@
 #define WEBDUINO_FAVICON_DATA ""
 #include <WebServer.h>
 
-#define VERSION   "1.2a"
+#define VERSION   "1.3"
 
 // TimeZone stuff
 TimeChangeRule myDST = {"PDT", Second, Sun, Mar, 2, -420};    //Pacific Daylight time = UTC - 7 hours
@@ -25,7 +26,7 @@ typedef struct {
 
 // My watering zones
 const byte NUM_ZONES = 4;
-WaterZone zoneList[NUM_ZONES] = {     // Watering zones
+WaterZone gZoneList[NUM_ZONES] = {     // Watering zones
   { false, 8, "SOUTH" },
   { false, 6, "NORTH" },
   { false, 7, "BACK" },
@@ -172,7 +173,7 @@ class ZoneLog {
     }
 };
 
-ZoneLog zoneLog;
+ZoneLog gZoneLog;
 
 typedef struct {
   int startTime;                      // Minutes from start of day
@@ -181,7 +182,7 @@ typedef struct {
   bool enabled;                       // Cycle is enabled (yes/no)
 } WaterCycle;
 
-WaterCycle curCycle;
+WaterCycle gCurCycle;
 
 typedef struct {
   time_t startTime;
@@ -201,8 +202,8 @@ class Schedule {
       // Clear out the schedule
       memset(eventList, 0, sizeof(eventList));
 
-      // If at least one day is active in cycle...
-      if (cycle->activeDays != 0) {
+      // If cycle is enabled and at least one day is active...
+      if (cycle->enabled && cycle->activeDays != 0) {
 
         // Find start of first event following current time
         time_t localTime = myTZ.toLocal(now());
@@ -211,7 +212,7 @@ class Schedule {
           eventStart += SECS_PER_DAY;
         }
 
-        //Create events to fill schedule
+        // Create events to fill schedule
         int i = 0;
         while (i < NUM_SCHED_EVENTS) {
           if (cycle->activeDays & (1 << weekday(eventStart))) {
@@ -228,18 +229,14 @@ class Schedule {
     }
 
     // Scan schedule for an active watering zone
-    int activeZone(WaterCycle *cycle) {
+    int activeZone(void) {
 
-      // If watering cycle is enabled...
-      if (cycle->enabled) {
-
-        time_t localTime = myTZ.toLocal(now());
-        for (int i = 0; i < NUM_SCHED_EVENTS; i++) {
-          if (localTime >= eventList[i].startTime) {
-            for (int j = 0; j < NUM_ZONES; j++) {
-              if (localTime < eventList[i].zoneStopTime[j]) {
-                return (j);
-              }
+      time_t localTime = myTZ.toLocal(now());
+      for (int i = 0; i < NUM_SCHED_EVENTS; i++) {
+        if (localTime >= eventList[i].startTime) {
+          for (int j = 0; j < NUM_ZONES; j++) {
+            if (localTime < eventList[i].zoneStopTime[j]) {
+              return (j);
             }
           }
         }
@@ -249,34 +246,53 @@ class Schedule {
       return (-1);
     }
 
-    // return the next watering event on the schedule
-    time_t nextRun(void) {
-      return eventList[0].startTime;
+    // return the start time of next scheduled watering event
+    time_t nextEventStart(time_t curTime) {
+      for (int i = 0; i < NUM_SCHED_EVENTS; i++) {
+        if (curTime < eventList[i].startTime) {
+          return eventList[i].startTime;
+        }
+      }
+    }
+
+    // Is the current schedule "stale" (i.e. older than current time)?
+    boolean isStale(void) {
+      time_t localTime = myTZ.toLocal(now());
+      
+      if (localTime > eventList[NUM_SCHED_EVENTS-1].zoneStopTime[NUM_ZONES-1]) {
+        return (true);
+      } else {
+        return (false);
+      }
     }
 };
 
-Schedule execSchedule;
+Schedule gExecSchedule;
+
+/***********************************************************************
+ * Zone Control Functions
+ **********************************************************************/
 
 // zoneOn() - Turn on a watering zone (only one ON at a time)
 void zoneOn(byte zone) {
-  if (! zoneList[zone].on) {
+  if (! gZoneList[zone].on) {
     for (int i = 0; i < NUM_ZONES; i++) {
       zoneOff(i);
     }
-    zoneList[zone].on = true;
-    digitalWrite(zoneList[zone].pin, HIGH);
-    delay(10);
-    zoneLog.add(zone, true);
+    gZoneList[zone].on = true;
+    digitalWrite(gZoneList[zone].pin, HIGH);
+    delay(20);
+    gZoneLog.add(zone, true);
   }
 }
 
 // zoneOff() - Turn off a watering zone
 void zoneOff(byte zone) {
-  if (zoneList[zone].on) {
-    zoneList[zone].on = false;
-    digitalWrite(zoneList[zone].pin, LOW);
-    delay(10);
-    zoneLog.add(zone, false);
+  if (gZoneList[zone].on) {
+    gZoneList[zone].on = false;
+    digitalWrite(gZoneList[zone].pin, LOW);
+    delay(20);
+    gZoneLog.add(zone, false);
   }
 }
 
@@ -286,11 +302,6 @@ void allZonesOff() {
     zoneOff(i);
   }
 }
-
-// MAC address is arbitrary
-byte mac[] = {
-  0x00, 0xAA, 0xBB, 0xCC, 0xDE, 0x02
-};
 
 // UDP stuff
 const byte NTP_PACKET_SIZE = 48;      // NTP time stamp is in the first 48 bytes of the message
@@ -304,7 +315,7 @@ WebServer webserver("", 80);
 void htmlZoneHeaders(WebServer &server) {
   for (int i = 0; i < NUM_ZONES; i++) {
     server.printP(htmlTHHead);
-    server.print(zoneList[i].name);
+    server.print(gZoneList[i].name);
     server.printP(PSTR("<br>(# "));
     server.print(intToStr(i + 1, 0));
     server.printP(PSTR(")</th>"));
@@ -394,11 +405,11 @@ void homeCmd(WebServer &server, WebServer::ConnectionType type, char *, bool) {
     server.printP(htmlNextRow);
     server.printP(PSTR("<th>Next Cycle</th>"));
     server.printP(htmlTDHead);
-    if (curCycle.enabled) {
-      if (execSchedule.nextRun() == 0) {
+    if (gCurCycle.enabled) {
+      if (gExecSchedule.nextEventStart(localTime) == 0) {
         server.printP(PSTR("<em>None</em>"));
       } else {
-        htmlTimeStr(execSchedule.nextRun(), &server);
+        htmlTimeStr(gExecSchedule.nextEventStart(localTime), &server);
       }
     } else {
       server.printP(PSTR("<em>Disabled</em>"));
@@ -432,7 +443,7 @@ void homeCmd(WebServer &server, WebServer::ConnectionType type, char *, bool) {
     server.printP(htmlNextRow);
     for (int i = 0; i < NUM_ZONES; i++) {
       const char *btnVal;
-      if (zoneList[i].on) {
+      if (gZoneList[i].on) {
         server.printP(PSTR("<td class=\"on\">ON"));
         btnVal = "OFF";
       } else {
@@ -458,7 +469,7 @@ void homeCmd(WebServer &server, WebServer::ConnectionType type, char *, bool) {
     server.printP(PSTR("<th colspan=\"7\">WATERING DAYS</th>"));
     server.printP(htmlNextRow);
     server.printP(PSTR("<td><input type=\"checkbox\" "));
-    if (curCycle.enabled) {
+    if (gCurCycle.enabled) {
       server.printP(PSTR("checked "));
     }
     server.printP(PSTR("name=\"E\"></td>"));
@@ -467,7 +478,7 @@ void homeCmd(WebServer &server, WebServer::ConnectionType type, char *, bool) {
       int hr = (j < 13) ? j : j - 12;
       const char *tail = (j < 12) ? "AM" : "PM";
       server.printP(PSTR("<option "));
-      if (curCycle.startTime == j * 60) {
+      if (gCurCycle.startTime == j * 60) {
         server.printP(PSTR("selected "));
       }
       server.printP(PSTR("value=\""));
@@ -482,13 +493,13 @@ void homeCmd(WebServer &server, WebServer::ConnectionType type, char *, bool) {
     // Cycle zone durations
     int cycleUsage = 0;
     for (int j = 0; j < NUM_ZONES; j++) {
-      cycleUsage += curCycle.zone_duration[j];
+      cycleUsage += gCurCycle.zone_duration[j];
       server.printP(PSTR("<td><select name=\"Z"));
       server.print(intToStr(j, 0));
       server.printP(PSTR("\">"));
       for (int k = 0; k < 35; k += 5) {
         server.printP(PSTR("<option "));
-        if (curCycle.zone_duration[j] == k) {
+        if (gCurCycle.zone_duration[j] == k) {
           server.printP(PSTR("selected "));
         }
         server.printP(PSTR("value=\""));
@@ -505,7 +516,7 @@ void homeCmd(WebServer &server, WebServer::ConnectionType type, char *, bool) {
     server.printP(htmlTDHead);
     for (int j = 0; j < DAYS_PER_WEEK; j++) {
       server.printP(PSTR("<input type=\"checkbox\" "));
-      if (curCycle.activeDays & (1 << j + 1)) {
+      if (gCurCycle.activeDays & (1 << j + 1)) {
         weekUsage += cycleUsage;
         server.printP(PSTR("checked "));
       }
@@ -534,7 +545,7 @@ void homeCmd(WebServer &server, WebServer::ConnectionType type, char *, bool) {
     server.printP(PSTR("<h3>Activity Log</h3>"));
     server.printP(PSTR("<form action=\"log.html\">"));
     server.printP(htmlTableHead);
-    zoneLog.dumpHTML(&server);
+    gZoneLog.dumpHTML(&server);
     server.printP(htmlTableTail);
     server.printP(htmlPara);
     server.printP(PSTR("<input type=\"submit\" name=\"CLEAR\" value=\"CLEAR\">"));
@@ -578,33 +589,33 @@ void cycleCmd(WebServer &server, WebServer::ConnectionType type, char *tail, boo
 
   // If a HEAD request, do nothing else
   if (type != WebServer::HEAD) {
-    curCycle.activeDays = 0;    // Initialize attributes
-    curCycle.enabled = false;
+    gCurCycle.activeDays = 0;    // Initialize attributes
+    gCurCycle.enabled = false;
 
     while (strlen(tail)) {
       if (server.nextURLparam(&tail, pName, LEN, pValue, LEN) != URLPARAM_EOS) {
         if (strcmp(pName, "time") == 0) {
-          curCycle.startTime = strToInt(pValue);
+          gCurCycle.startTime = strToInt(pValue);
 
         } else if (pName[0] == 'Z') {
           int zone = pName[1] - '0';
-          curCycle.zone_duration[zone] = strToInt(pValue);
+          gCurCycle.zone_duration[zone] = strToInt(pValue);
 
         } else if (pName[0] == 'D') {
           int day = pName[1] - '0';
-          curCycle.activeDays |= (1 << day);
+          gCurCycle.activeDays |= (1 << day);
 
         } else if (pName[0] == 'E') {
-          curCycle.enabled = true;
+          gCurCycle.enabled = true;
         }
       }
     }
   }
 
-  EEPROM.put(EEADDR_WATER_CYCLE, curCycle);     // update EEPROM
+  EEPROM.put(EEADDR_WATER_CYCLE, gCurCycle);     // update EEPROM
 
   // re-build execution schedule
-  execSchedule.build(&curCycle);
+  gExecSchedule.build(&gCurCycle);
 
   server.httpSeeOther("index.html");              // redirect back to "home" page
 }
@@ -620,7 +631,7 @@ void logCmd(WebServer &server, WebServer::ConnectionType type, char *tail, bool)
     while (strlen(tail)) {
       if (server.nextURLparam(&tail, pName, LEN, pValue, LEN) != URLPARAM_EOS) {
         if (strcmp(pName, "CLEAR") == 0) {
-          zoneLog.clear();                       // Clear zone log
+          gZoneLog.clear();                       // Clear zone log
         }
       }
     }
@@ -628,6 +639,14 @@ void logCmd(WebServer &server, WebServer::ConnectionType type, char *tail, bool)
   server.httpSeeOther("index.html");             // redirect back to "home" page
 }
 
+// MAC address is arbitrary
+byte mac[] = {
+  0x00, 0xAA, 0xBB, 0xCC, 0xDE, 0x02
+};
+  
+/***********************************************************************
+ * SETUP()
+ **********************************************************************/
 void setup() {
 
   // Disable SD card on Ethernet shield
@@ -637,7 +656,7 @@ void setup() {
   // Open serial communications
   // Serial.begin(9600);
 
-  // Start ethernet connection using DHCP for IP address
+  // Start ethernet connection using DHCP to obtain IP address
   if (Ethernet.begin(mac) == 0) {
     // Serial.println("DHCP Failed!");
     while (1) ;
@@ -661,10 +680,10 @@ void setup() {
   webserver.begin();
 
   // Initialize zone log
-  zoneLog.begin();
+  gZoneLog.begin();
 
   // Mark RESET in log
-  zoneLog.add(99, false);
+  gZoneLog.add(99, false);
 
   // Come up in idle mode
   sysStatus.mode = IDLE_MODE;
@@ -674,23 +693,32 @@ void setup() {
 
   //initialize zone control pins
   for (int i = 0; i < NUM_ZONES; i++) {
-    pinMode(zoneList[i].pin, OUTPUT);
+    pinMode(gZoneList[i].pin, OUTPUT);
   }
 
   allZonesOff();    // make sure all zones are off
 
   // Initialize variables from EEPROM
-  EEPROM.get(EEADDR_WATER_CYCLE, curCycle);
+  EEPROM.get(EEADDR_WATER_CYCLE, gCurCycle);
 
   // build schedule
-  execSchedule.build(&curCycle);
+  gExecSchedule.build(&gCurCycle);
+
+  // enable watchdog timer
+  wdt_enable(WDTO_4S);      // 4 secs.
 }
 
+/***********************************************************************
+ * LOOP()
+ **********************************************************************/
 void loop() {
   char buff[100];
   int len = 100;
   int z;
 
+  /* reset watchdog - still alive! */
+  wdt_reset();
+  
   /* process incoming web connections one at a time */
   webserver.processConnection(buff, &len);
 
@@ -698,7 +726,7 @@ void loop() {
   if (sysStatus.mode != MANUAL_MODE) {
 
     // Check schedule for automatic watering activity
-    if ((z = execSchedule.activeZone(&curCycle)) != -1) {
+    if ((z = gExecSchedule.activeZone()) != -1) {
 
       // Turn on active zone
       zoneOn(z);
@@ -709,9 +737,11 @@ void loop() {
       // No active zones
       allZonesOff();
       sysStatus.mode = IDLE_MODE;
+    }
 
-      // Re-build schedule when idle
-      execSchedule.build(&curCycle);
+    // Build new schedule if current one is "stale"
+    if (gExecSchedule.isStale()) {
+      gExecSchedule.build(&gCurCycle);
     }
   }
 
