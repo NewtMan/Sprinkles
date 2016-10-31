@@ -9,14 +9,15 @@
 #define WEBDUINO_FAVICON_DATA ""
 #include <WebServer.h>
 
-#define VERSION   "1.3"
+#define VERSION   "1.4"
 
 // TimeZone stuff
 TimeChangeRule myDST = {"PDT", Second, Sun, Mar, 2, -420};    //Pacific Daylight time = UTC - 7 hours
 TimeChangeRule mySTD = {"PST", First, Sun, Nov, 2, -480};     //Pacific Standard time = UTC - 8 hours
 Timezone myTZ(myDST, mySTD);
 
-#define MAX_ZONE_NAME   8
+#define MAX_SUSPEND_DAYS  5       // Max. days to allow schedule suspension
+#define MAX_ZONE_NAME     8
 
 typedef struct {
   boolean on;                         // ON/OFF state
@@ -39,12 +40,48 @@ typedef enum {
   AUTO_MODE,                   // operating based upon schedule
 } SystemMode;
 
-typedef struct {
-  SystemMode mode;             // current operating mode
-  time_t resetTime;            // last reset timestamp
-} SystemStatus;
+class SystemStatus {
+    SystemMode mode;             // current operating mode
+    time_t resetTime;            // last reset timestamp
+    time_t delayTime;            // delay schedule until this time (0 = no delay)
 
-SystemStatus sysStatus;
+  public:
+  
+    SystemMode getMode() {
+      return (mode);
+    }
+    
+    void setMode(SystemMode m) {
+      mode = m;
+    }
+    
+    time_t getResetTime() {
+      return (resetTime);
+    }
+    
+    void setResetTime(time_t t) {
+      resetTime = t;
+    }
+    
+    time_t getDelayTime() {
+      return (delayTime);
+    }
+    
+    void setDelayTime(time_t t) {
+      delayTime = t;
+    }
+    
+    void ageDelayTime() {
+      if (delayTime > 0) {
+        time_t localTime = myTZ.toLocal(now());
+        if (localTime > delayTime) {
+          delayTime = 0;
+        }
+      }
+    }
+};
+
+SystemStatus gSysStatus;
 
 // Zone log calculations
 #define ZONE_LOG_LENGTH         ((NUM_ZONES * 2 * 3) + 1)     // 2 entries/zone cycle (ON & OFF) and 3 complete cycles, plus the "throwaway"
@@ -56,16 +93,17 @@ SystemStatus sysStatus;
 #define EEADDR_ZONE_LOG_START   (EEADDR_ZONE_LOG_BASE + (2 *sizeof(int)))
 #define EEADDR_ZONE_LOG_END     (EEADDR_ZONE_LOG_START + (ZONE_LOG_LENGTH * ZONE_LOG_ELEM_SIZE))
 
-
-// HTML strings/tools
+// HTML strings/tools (in program space)
 P(htmlDocStyle) = "<head><style>\
-                      body{background-color:#b0c4de;}\
+                      body{background-color:#B3E5FC;}\
+                      .tt{background-color:#17A589;color:#ffffff;font-weight:bold;text-align:left;}\
                       td,th{padding:3px;text-align:center;background-color:#ffffff;}\
                       .on{background-color:#66cc66}\
+                      .warn{background-color:#ffff00}\
                       .title{font-size:xx-large;font-weight:bold}\
                       .vers{font-size:small}\
                    </style></head>\n";
-P(htmlTableHead) = "<table border=\"1\"><tr>\n";
+P(htmlTableHead) = "<table border=\"1\"><tr><th class=\"tt\" colspan=\"99\">\n";
 P(htmlNextRow) = "</tr><tr>\n";
 P(htmlTDHead) = "<td>\n";
 P(htmlTDTail) = "</td>\n";
@@ -151,7 +189,7 @@ class ZoneLog {
           EEPROM.get(addr, tm);
           addr += sizeof(tm);
           server->printP(htmlTDHead);
-          htmlTimeStr(tm, server);
+          htmlTimeStr(tm, true, server);
           server->printP(htmlTDTail);
 
           EEPROM.get(addr, zone);
@@ -197,7 +235,7 @@ class Schedule {
   public:
 
     // Build execution schedule from current watering cycle
-    void build(WaterCycle *cycle) {
+    void build(WaterCycle *cycle, SystemStatus *sysStatus) {
 
       // Clear out the schedule
       memset(eventList, 0, sizeof(eventList));
@@ -205,10 +243,10 @@ class Schedule {
       // If cycle is enabled and at least one day is active...
       if (cycle->enabled && cycle->activeDays != 0) {
 
-        // Find start of first event following current time
+        // Find start of first event following current time and any rain delay
         time_t localTime = myTZ.toLocal(now());
         time_t eventStart = previousMidnight(localTime) + (cycle->startTime * SECS_PER_MIN);
-        while (eventStart < localTime) {
+        while (eventStart < max(localTime, gSysStatus.getDelayTime())) {
           eventStart += SECS_PER_DAY;
         }
 
@@ -258,7 +296,7 @@ class Schedule {
     // Is the current schedule "stale" (i.e. older than current time)?
     boolean isStale(void) {
       time_t localTime = myTZ.toLocal(now());
-      
+   
       if (localTime > eventList[NUM_SCHED_EVENTS-1].zoneStopTime[NUM_ZONES-1]) {
         return (true);
       } else {
@@ -309,10 +347,11 @@ byte ntpPacket[NTP_PACKET_SIZE];      // buffer to hold incoming and outgoing pa
 EthernetUDP Udp;                      // A UDP instance to let us send and receive packets over UDP
 char timeServer[] = "10.0.0.1";       // local NTP server
 
-// Initialize the Webduino server (port 80)
-WebServer webserver("", 80);
+/***********************************************************************
+ * HTML Utility Functions
+ **********************************************************************/
 
-void htmlZoneHeaders(WebServer &server) {
+void htmlZoneHeaders(WebServer &server) {		// Print table headers for all watering zones
   for (int i = 0; i < NUM_ZONES; i++) {
     server.printP(htmlTHHead);
     server.print(gZoneList[i].name);
@@ -322,7 +361,7 @@ void htmlZoneHeaders(WebServer &server) {
   }
 }
 
-void htmlTimeStr(time_t t, WebServer *server) {
+void htmlTimeStr(time_t t, bool inclTime, WebServer *server) {		// Print a formatted string of the given time
   server->print(dayStr(weekday(t)));
   server->printP(PSTR(" "));
   server->print(intToStr(month(t), 2));
@@ -330,16 +369,21 @@ void htmlTimeStr(time_t t, WebServer *server) {
   server->print(intToStr(day(t), 2));
   server->printP(PSTR("/"));
   server->print(intToStr(year(t) - 2000, 2));
-  server->printP(PSTR(" "));
-  server->print(intToStr(hourFormat12(t), 2));
-  server->printP(PSTR(":"));
-  server->print(intToStr(minute(t), 2));
-  server->printP(PSTR(" "));
-  server->print(isAM(t) ? "AM " : "PM ");
-  server->print(myTZ.locIsDST(t) ? myDST.abbrev : mySTD.abbrev) ;
+  if (inclTime) {
+    server->printP(PSTR(" "));
+    server->print(intToStr(hourFormat12(t), 2));
+    server->printP(PSTR(":"));
+    server->print(intToStr(minute(t), 2));
+    server->printP(PSTR(":"));
+    server->print(intToStr(second(t), 2));
+    server->printP(PSTR(" "));
+    server->print(isAM(t) ? "AM " : "PM ");
+    server->print(myTZ.locIsDST(t) ? myDST.abbrev : mySTD.abbrev) ;
+  }
 }
 
-void htmlUptimeStr(time_t t, WebServer *server) {
+
+void htmlUptimeStr(time_t t, WebServer *server) {	// Print a formatted string of the current uptime
   int d;
 
   if ((d = t / SECS_PER_WEEK) > 0) {
@@ -366,6 +410,13 @@ void htmlUptimeStr(time_t t, WebServer *server) {
   server->printP(PSTR(" secs"));
 }
 
+/***********************************************************************
+ * Webserver Callback Functions
+ **********************************************************************/
+
+// Initialize the Webduino server (port 80)
+WebServer webserver("", 80);
+
 // Webserver callback - "Home" page
 void homeCmd(WebServer &server, WebServer::ConnectionType type, char *, bool) {
   time_t localTime = myTZ.toLocal(now());
@@ -383,14 +434,19 @@ void homeCmd(WebServer &server, WebServer::ConnectionType type, char *, bool) {
 
     // Current time
     server.printP(htmlTableHead);
+    server.printP(PSTR("System Status</th>"));
+    server.printP(htmlNextRow);
     server.printP(PSTR("<th>Time</th><td>"));
     if (timeStatus() == timeNotSet) {
       server.printP(PSTR("Not Set"));
     } else {
-      htmlTimeStr(localTime, &server);
+      htmlTimeStr(localTime, true, &server);
       if (timeStatus() == timeNeedsSync) {
         server.printP(PSTR(" (STALE)"));
       }
+      // server.printP(PSTR("<br>(Adjust "));
+      // server.print(intToStr((int)getAdjMicros(), 0));
+      // server.printP(PSTR(" microsecs)"));
     }
     server.printP(htmlTDTail);
 
@@ -398,7 +454,7 @@ void homeCmd(WebServer &server, WebServer::ConnectionType type, char *, bool) {
     server.printP(htmlNextRow);
     server.printP(PSTR("<th>Up Time</th>"));
     server.printP(htmlTDHead);
-    htmlUptimeStr(localTime - sysStatus.resetTime, &server);
+    htmlUptimeStr(localTime - gSysStatus.getResetTime(), &server);
     server.printP(htmlTDTail);
 
     // Next cycle runtime
@@ -409,7 +465,7 @@ void homeCmd(WebServer &server, WebServer::ConnectionType type, char *, bool) {
       if (gExecSchedule.nextEventStart(localTime) == 0) {
         server.printP(PSTR("<em>None</em>"));
       } else {
-        htmlTimeStr(gExecSchedule.nextEventStart(localTime), &server);
+        htmlTimeStr(gExecSchedule.nextEventStart(localTime), true, &server);
       }
     } else {
       server.printP(PSTR("<em>Disabled</em>"));
@@ -418,8 +474,8 @@ void homeCmd(WebServer &server, WebServer::ConnectionType type, char *, bool) {
 
     // System status
     server.printP(htmlNextRow);
-    server.printP(PSTR("<th>System Status</th>"));
-    switch (sysStatus.mode) {
+    server.printP(PSTR("<th>Mode</th>"));
+    switch (gSysStatus.getMode()) {
       case IDLE_MODE:
         server.printP(PSTR("<td>IDLE</td>"));
         break;
@@ -435,9 +491,10 @@ void homeCmd(WebServer &server, WebServer::ConnectionType type, char *, bool) {
     server.printP(htmlPara);
 
     // Zone status and manual controls
-    server.printP(PSTR("<h3>Zone Status</h3>"));
     server.printP(PSTR("<form action=\"manual.html\">"));
     server.printP(htmlTableHead);
+    server.printP(PSTR("Zone Status</th>"));
+    server.printP(htmlNextRow);
     server.printP(PSTR("<th rowspan=\"2\"><input type=\"submit\" value=\"ALL OFF\" name=\"ALL\"></th>"));
     htmlZoneHeaders(server);
     server.printP(htmlNextRow);
@@ -459,10 +516,47 @@ void homeCmd(WebServer &server, WebServer::ConnectionType type, char *, bool) {
     server.printP(htmlTableTail);
     server.printP(htmlFormTail);
 
+    // Rain Delay
+    if (gSysStatus.getDelayTime() > 0) {
+
+      // Delay set - configure to clear it
+      server.printP(PSTR("<form action=\"cleardelay.html\">"));
+      server.printP(htmlTableHead);
+      server.printP(PSTR("Rain Delay</th>"));
+      server.printP(htmlNextRow);
+      server.printP(PSTR("<td class=\"warn\">Delayed until "));
+      htmlTimeStr(gSysStatus.getDelayTime(), false, &server);
+      server.printP(htmlTDTail);
+      server.printP(htmlNextRow);
+      server.printP(PSTR("<td><input type=\"submit\" value=\"CLEAR\">"));
+    } else {
+
+      // Delay not set - configure to set one
+      server.printP(PSTR("<form action=\"setdelay.html\">"));
+      server.printP(htmlTableHead);
+      server.printP(PSTR("Rain Delay</th>"));
+      server.printP(htmlNextRow);
+      server.printP(PSTR("<td>No Delay</td>"));
+      server.printP(htmlNextRow);
+      server.printP(PSTR("<td>Delay for: <select name=\"delay\">"));
+      for (int j = 0; j < MAX_SUSPEND_DAYS; j++) {
+        server.printP(PSTR("<option value=\""));
+        server.print(intToStr(j + 1, 0));
+        server.printP(PSTR("\">"));
+        server.print(intToStr(j + 1, 0));
+        server.printP(PSTR(" days"));
+      }
+      server.printP(PSTR("</select>&nbsp;&nbsp;<input type=\"submit\" value=\"SET\">"));
+    }
+    server.printP(htmlTDTail);
+    server.printP(htmlTableTail);
+    server.printP(htmlFormTail);
+    
     // Watering cycle
-    server.printP(PSTR("<h3>Watering Cycle</h3>"));
     server.printP(PSTR("<form action=\"cycle.html\">"));
     server.printP(htmlTableHead);
+    server.printP(PSTR("Watering Cycle</th>"));
+    server.printP(htmlNextRow);
     server.printP(PSTR("<th>Enabled</th>"));
     server.printP(PSTR("<th>Start<br>Time</th>"));
     htmlZoneHeaders(server);
@@ -529,22 +623,20 @@ void homeCmd(WebServer &server, WebServer::ConnectionType type, char *, bool) {
 
     // Total cycle usage
     server.printP(htmlNextRow);
-    server.printP(PSTR("<th>Usage</th><td colspan=\"99\">"));
+    server.printP(PSTR("<td><input type=\"submit\" value=\"SAVE\"></td></th><td colspan=\"99\">"));
     server.print(intToStr(cycleUsage, 0));
     server.printP(PSTR(" mins/cycle, "));
     server.print(intToStr(weekUsage, 0));
     server.printP(PSTR(" mins/week"));
     server.printP(htmlTDTail);
-
     server.printP(htmlTableTail);
-    server.printP(htmlPara);
-    server.printP(PSTR("<input type=\"submit\" value=\"SAVE\">"));
     server.printP(htmlFormTail);
-
+      
     // Activity Log
-    server.printP(PSTR("<h3>Activity Log</h3>"));
     server.printP(PSTR("<form action=\"log.html\">"));
     server.printP(htmlTableHead);
+    server.printP(PSTR("Activity Log</th>"));
+    server.printP(htmlNextRow);
     gZoneLog.dumpHTML(&server);
     server.printP(htmlTableTail);
     server.printP(htmlPara);
@@ -568,14 +660,14 @@ void manualCmd(WebServer &server, WebServer::ConnectionType type, char *tail, bo
         int zone = pName[1] - '0';
         if (strcmp(pValue, "ON") == 0) {
           zoneOn(zone);
-          sysStatus.mode = MANUAL_MODE;
+          gSysStatus.setMode(MANUAL_MODE);
         } else if (strcmp(pValue, "OFF") == 0) {
           zoneOff(zone);
-          sysStatus.mode = IDLE_MODE;
+          gSysStatus.setMode(IDLE_MODE);
         }
       } else if (strcmp(pName, "ALL") == 0) {
         allZonesOff();
-        sysStatus.mode = IDLE_MODE;
+        gSysStatus.setMode(IDLE_MODE);
       }
     }
   }
@@ -615,9 +707,48 @@ void cycleCmd(WebServer &server, WebServer::ConnectionType type, char *tail, boo
   EEPROM.put(EEADDR_WATER_CYCLE, gCurCycle);     // update EEPROM
 
   // re-build execution schedule
-  gExecSchedule.build(&gCurCycle);
+  gExecSchedule.build(&gCurCycle, &gSysStatus);
 
   server.httpSeeOther("index.html");              // redirect back to "home" page
+}
+
+// Webserver callback - Process setting schedule delay
+void setDelayCmd(WebServer &server, WebServer::ConnectionType type, char *tail, bool) {
+  char pName[LEN];
+  char pValue[LEN];
+
+  // If a HEAD request, do nothing else
+  if (type != WebServer::HEAD) {
+
+    if (server.nextURLparam(&tail, pName, LEN, pValue, LEN) != URLPARAM_EOS) {
+      if (strcmp(pName, "delay") == 0) {
+        
+        time_t localTime = myTZ.toLocal(now());
+        gSysStatus.setDelayTime(nextMidnight((localTime + (strToInt(pValue) * SECS_PER_DAY))));
+      }
+    }
+        
+    // re-build execution schedule
+    gExecSchedule.build(&gCurCycle, &gSysStatus);
+  }
+  server.httpSeeOther("index.html");    // redirect back to "home" page
+}
+
+// Webserver callback - Process clearing schedule delay
+void clearDelayCmd(WebServer &server, WebServer::ConnectionType type, char *tail, bool) {
+  char pName[LEN];
+  char pValue[LEN];
+
+  // If a HEAD request, do nothing else
+  if (type != WebServer::HEAD) {
+
+    // Nothing to parse - simply clear the suspension time
+    gSysStatus.setDelayTime(0);
+    
+    // re-build execution schedule
+    gExecSchedule.build(&gCurCycle, &gSysStatus);
+  }
+  server.httpSeeOther("index.html");    // redirect back to "home" page
 }
 
 // Webserver callback - Process activity log
@@ -639,7 +770,7 @@ void logCmd(WebServer &server, WebServer::ConnectionType type, char *tail, bool)
   server.httpSeeOther("index.html");             // redirect back to "home" page
 }
 
-// MAC address is arbitrary
+// MAC address is arbitrary - but must be unique on local network
 byte mac[] = {
   0x00, 0xAA, 0xBB, 0xCC, 0xDE, 0x02
 };
@@ -669,27 +800,32 @@ void setup() {
 
   // Initialize Time to NTP server
   setSyncProvider(getNTPtime);
-  setSyncInterval(SECS_PER_DAY);    // sync. with NTP once per day
+  setSyncInterval(SECS_PER_DAY / 4);    // sync. with NTP four times a day
 
   // Initialize web server
   webserver.setDefaultCommand(&homeCmd);
   webserver.addCommand("index.html", &homeCmd);
   webserver.addCommand("manual.html", &manualCmd);
   webserver.addCommand("cycle.html", &cycleCmd);
+  webserver.addCommand("setdelay.html", &setDelayCmd);
+  webserver.addCommand("cleardelay.html", &clearDelayCmd);
   webserver.addCommand("log.html", &logCmd);
   webserver.begin();
 
   // Initialize zone log
   gZoneLog.begin();
 
-  // Mark RESET in log
-  gZoneLog.add(99, false);
+  // Record RESET in log
+  gZoneLog.add(98, false);    // Value is arbitrary
 
   // Come up in idle mode
-  sysStatus.mode = IDLE_MODE;
+  gSysStatus.setMode(IDLE_MODE);
 
   // Log reset time
-  sysStatus.resetTime = myTZ.toLocal(now());
+  gSysStatus.setResetTime(myTZ.toLocal(now()));
+
+  // Reset schedule suspension
+  gSysStatus.setDelayTime(0);
 
   //initialize zone control pins
   for (int i = 0; i < NUM_ZONES; i++) {
@@ -702,7 +838,7 @@ void setup() {
   EEPROM.get(EEADDR_WATER_CYCLE, gCurCycle);
 
   // build schedule
-  gExecSchedule.build(&gCurCycle);
+  gExecSchedule.build(&gCurCycle, &gSysStatus);
 
   // enable watchdog timer
   wdt_enable(WDTO_4S);      // 4 secs.
@@ -723,27 +859,30 @@ void loop() {
   webserver.processConnection(buff, &len);
 
   // If not operating manually...
-  if (sysStatus.mode != MANUAL_MODE) {
+  if (gSysStatus.getMode() != MANUAL_MODE) {
 
     // Check schedule for automatic watering activity
     if ((z = gExecSchedule.activeZone()) != -1) {
 
       // Turn on active zone
       zoneOn(z);
-      sysStatus.mode = AUTO_MODE;
+      gSysStatus.setMode(AUTO_MODE);
 
     } else {
 
       // No active zones
       allZonesOff();
-      sysStatus.mode = IDLE_MODE;
+      gSysStatus.setMode(IDLE_MODE);
     }
 
     // Build new schedule if current one is "stale"
     if (gExecSchedule.isStale()) {
-      gExecSchedule.build(&gCurCycle);
+      gExecSchedule.build(&gCurCycle, &gSysStatus);
     }
   }
+
+  // "age" any existing delay time
+  gSysStatus.ageDelayTime();
 
   // pause 1/4 sec.
   delay(250);
@@ -810,9 +949,11 @@ unsigned long getNTPtime() {
   return (0);
 }
 
-// Convert a string to an integer
+/***********************************************************************
+ * Data conversion utility functions
+ **********************************************************************/
 
-int strToInt(char *str) {
+int strToInt(char *str) {		// Convert a string to an integer
   int val = 0;
   for (int i = 0; i < strlen(str); i++) {
     val = (val * 10) + (str[i] - '0');
@@ -820,9 +961,7 @@ int strToInt(char *str) {
   return val;
 }
 
-// Convert an integer to a string (with optional left zero padding)
-
-char *intToStr(int v, int zeroPad) {
+char *intToStr(int v, int zeroPad) {	// Convert a positive integer to a string (with optional left zero padding)
   static char s[LEN];
   int i = LEN - 1;
 
