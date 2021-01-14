@@ -9,7 +9,7 @@
 #define WEBDUINO_FAVICON_DATA ""
 #include <WebServer.h>
 
-#define VERSION   "1.4"
+#define VERSION   "1.4a"
 
 // TimeZone stuff
 TimeChangeRule myDST = {"PDT", Second, Sun, Mar, 2, -420};    //Pacific Daylight time = UTC - 7 hours
@@ -39,6 +39,9 @@ typedef enum {
   MANUAL_MODE,                 // operating manually
   AUTO_MODE,                   // operating based upon schedule
 } SystemMode;
+
+// Necessary forward references
+extern void htmlTimeStr(time_t t, bool inclTime, WebServer *server);
 
 class SystemStatus {
     SystemMode mode;             // current operating mode
@@ -345,7 +348,7 @@ void allZonesOff() {
 const byte NTP_PACKET_SIZE = 48;      // NTP time stamp is in the first 48 bytes of the message
 byte ntpPacket[NTP_PACKET_SIZE];      // buffer to hold incoming and outgoing packets
 EthernetUDP Udp;                      // A UDP instance to let us send and receive packets over UDP
-char timeServer[] = "10.0.0.1";       // local NTP server
+char timeServer[] = "pool.ntp.org";   // Universal pool of NTP servers
 
 /***********************************************************************
  * HTML Utility Functions
