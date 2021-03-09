@@ -1,3 +1,8 @@
+//*********************************************************
+// Sprinkles.ino - Sprinkler Control System
+//
+// Processor: Arduino Uno
+//
 #include <avr/wdt.h>
 #include <EEPROM.h>
 #include <SPI.h>
@@ -9,7 +14,13 @@
 #define WEBDUINO_FAVICON_DATA ""
 #include <WebServer.h>
 
-#define VERSION   "1.4a"
+#define VERSION   "1.5"
+
+// UDP stuff for NTP interactions
+const byte NTP_PACKET_SIZE = 48;	// NTP time stamp is in the first 48 bytes of the message
+byte ntpPacket[NTP_PACKET_SIZE];	// buffer to hold incoming and outgoing packets
+EthernetUDP Udp;			// A UDP instance to let us send and receive packets over UDP
+char timeServer[] = "10.0.0.2";   	// Local NTP server
 
 // TimeZone stuff
 TimeChangeRule myDST = {"PDT", Second, Sun, Mar, 2, -420};    //Pacific Daylight time = UTC - 7 hours
@@ -343,12 +354,6 @@ void allZonesOff() {
     zoneOff(i);
   }
 }
-
-// UDP stuff
-const byte NTP_PACKET_SIZE = 48;      // NTP time stamp is in the first 48 bytes of the message
-byte ntpPacket[NTP_PACKET_SIZE];      // buffer to hold incoming and outgoing packets
-EthernetUDP Udp;                      // A UDP instance to let us send and receive packets over UDP
-char timeServer[] = "pool.ntp.org";   // Universal pool of NTP servers
 
 /***********************************************************************
  * HTML Utility Functions
@@ -830,7 +835,7 @@ void setup() {
   // Reset schedule suspension
   gSysStatus.setDelayTime(0);
 
-  //initialize zone control pins
+  // Initialize zone control pins
   for (int i = 0; i < NUM_ZONES; i++) {
     pinMode(gZoneList[i].pin, OUTPUT);
   }
@@ -844,7 +849,7 @@ void setup() {
   gExecSchedule.build(&gCurCycle, &gSysStatus);
 
   // enable watchdog timer
-  wdt_enable(WDTO_4S);      // 4 secs.
+  wdt_enable(WDTO_8S);      // 8 secs.
 }
 
 /***********************************************************************
@@ -916,7 +921,7 @@ void sendNTPrequest(char* address)
   Udp.endPacket();
 }
 
-// Parse response from NTP server
+// Get time from NTP server
 unsigned long getNTPtime() {
 
   // Discard any previous packets
