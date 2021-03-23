@@ -2,6 +2,7 @@
 // Sprinkles.ino - Sprinkler Control System
 //
 // Processor: Arduino Uno
+// Programmer: ArduinoISP
 //
 #include <avr/wdt.h>
 #include <EEPROM.h>
@@ -14,7 +15,7 @@
 #define WEBDUINO_FAVICON_DATA ""
 #include <WebServer.h>
 
-#define VERSION   "1.5"
+#define VERSION   "1.5a"
 
 // UDP stuff for NTP interactions
 const byte NTP_PACKET_SIZE = 48;	// NTP time stamp is in the first 48 bytes of the message
@@ -849,7 +850,7 @@ void setup() {
   gExecSchedule.build(&gCurCycle, &gSysStatus);
 
   // enable watchdog timer
-  wdt_enable(WDTO_8S);      // 8 secs.
+  wdt_enable(WDTO_4S);      // 4 secs.
 }
 
 /***********************************************************************
